@@ -1,6 +1,6 @@
 [package]
 name = "gelbooru-scraper"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Jiftoo <contact@jiftoo.dev>"]
 description = "A simple CLI tool to download images from Gelbooru"
 edition = "2021"

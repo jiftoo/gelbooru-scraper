@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use clap::Parser;
 use std::{
-	collections::HashMap,
+	collections::BTreeMap,
 	io::Write,
 	path::{Path, PathBuf},
 	sync::{
@@ -25,6 +25,7 @@ struct Cli {
 	#[arg(short)]
 	output_dir: PathBuf,
 	#[arg(help = "Whitespace-separated list of tags to search for.")]
+	#[arg(allow_hyphen_values = true)]
 	tags: Vec<String>,
 	#[arg(long)]
 	#[arg(
@@ -36,27 +37,30 @@ struct Cli {
 		help = "Optional user id. Has to be specified with api_key. Can be found at https://gelbooru.com/index.php?page=account&s=options"
 	)]
 	user_id: Option<String>,
+	#[arg(short = 'j')]
+	#[arg(long)]
+	#[arg(
+		help = "Write post metadata to a JSON file. If no path is specified, writes to <OUTPUT_DIR>/posts.json. Path is relative to <OUTPUT_DIR>."
+	)]
+	write_json: Option<Option<PathBuf>>,
+	#[arg(short = 'J')]
+	#[arg(long)]
+	#[arg(help = "Makes the metadata JSON human-readable. Implies '--write-json'.")]
+	write_pretty_json: Option<Option<PathBuf>>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
 	// console_subscriber::init();
 
-	let Cli {
-		yes,
-		output_dir,
-		tags,
-		api_key,
-		user_id,
-	} = Cli::parse();
+	let Cli { yes, output_dir, tags, api_key, user_id, write_json, write_pretty_json } =
+		Cli::parse();
 
 	if api_key.as_ref().xor(user_id.as_ref()).is_some() {
 		return Err(anyhow!("api_key and user_id must be specified together"));
 	}
 
-	if !output_dir.exists() {
-		std::fs::create_dir_all(&output_dir)?;
-	} else if !output_dir.is_dir() {
+	if output_dir.exists() && !output_dir.is_dir() {
 		return Err(anyhow!("Not a directory: {:?}", output_dir));
 	}
 
@@ -83,6 +87,20 @@ async fn main() -> anyhow::Result<()> {
 		}
 	}
 
+	if !output_dir.exists() {
+		std::fs::create_dir_all(&output_dir)?;
+	}
+
+	let mut json_printer = match (write_json, write_pretty_json) {
+		(Some(path), _) => JsonPrinter::compact(std::fs::File::create(
+			output_dir.join(path.unwrap_or_else(|| "posts.json".into())),
+		)?),
+		(_, Some(path)) => JsonPrinter::pretty(std::fs::File::create(
+			output_dir.join(path.unwrap_or_else(|| "posts.json".into())),
+		)?),
+		_ => JsonPrinter::noop(),
+	};
+
 	let processed = Arc::new(AtomicUsize::new(0));
 	let written = Arc::new(AtomicUsize::new(0));
 	let mut page = 0;
@@ -90,6 +108,8 @@ async fn main() -> anyhow::Result<()> {
 	while let GelbooruData { posts: Some(posts), .. } =
 		client.query_gelbooru(api_key.as_deref(), user_id.as_deref(), 100, page, &tags).await?
 	{
+		json_printer.insert_posts(&posts);
+
 		for post in posts {
 			let path = output_dir.join(&post.image);
 			if path.exists() {
@@ -141,6 +161,8 @@ async fn main() -> anyhow::Result<()> {
 		processed.load(Ordering::Relaxed) - written.load(Ordering::Relaxed)
 	);
 
+	json_printer.write()?;
+
 	Ok(())
 }
 
@@ -150,7 +172,11 @@ impl GelbooruClient {
 	fn new() -> anyhow::Result<Self> {
 		Ok(GelbooruClient(
 			reqwest::Client::builder()
-				.user_agent(concat!(std::env!("CARGO_PKG_NAME"), "/", std::env!("CARGO_PKG_VERSION")))
+				.user_agent(concat!(
+					std::env!("CARGO_PKG_NAME"),
+					"/",
+					std::env!("CARGO_PKG_VERSION")
+				))
 				.build()?,
 			Arc::new(tokio::sync::Semaphore::new(24)),
 		))
@@ -209,7 +235,7 @@ struct GelbooruAttributes {
 	count: usize,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize, Clone)]
 pub struct GelbooruPost {
 	pub id: i64,
 	pub created_at: String,
@@ -240,4 +266,46 @@ pub struct GelbooruPost {
 	pub status: String,
 	pub post_locked: i64,
 	pub has_children: String,
+}
+
+enum JsonPrinter {
+	Compact(std::fs::File, BTreeMap<String, GelbooruPost>),
+	Pretty(std::fs::File, BTreeMap<String, GelbooruPost>),
+	NoOp,
+}
+
+impl JsonPrinter {
+	fn compact(file: std::fs::File) -> Self {
+		Self::Compact(file, Default::default())
+	}
+
+	fn pretty(file: std::fs::File) -> Self {
+		Self::Pretty(file, Default::default())
+	}
+
+	fn noop() -> Self {
+		Self::NoOp
+	}
+
+	fn insert_posts(&mut self, posts: &[GelbooruPost]) {
+		match self {
+			Self::Pretty(_, map) | Self::Compact(_, map) => {
+				map.extend(posts.iter().map(|post| (post.md5.clone(), post.clone())));
+			}
+			Self::NoOp => {}
+		}
+	}
+
+	fn write(self) -> anyhow::Result<()> {
+		match self {
+			Self::Compact(file, posts) => {
+				serde_json::to_writer(file, &posts)?;
+			}
+			Self::Pretty(file, posts) => {
+				serde_json::to_writer_pretty(file, &posts)?;
+			}
+			Self::NoOp => {}
+		}
+		Ok(())
+	}
 }
