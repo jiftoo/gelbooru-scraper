@@ -40,7 +40,9 @@ struct Cli {
 	#[arg(short = 'j')]
 	#[arg(long)]
 	#[arg(
-		help = "Write post metadata to a JSON file. If no path is specified, writes to <OUTPUT_DIR>/posts.json. Path is relative to <OUTPUT_DIR>."
+		help = "Write post metadata to a JSON file. If no path is specified, writes to <OUTPUT_DIR>/posts.json.
+Path is relative to <OUTPUT_DIR>.
+If path is '-', writes to stderr."
 	)]
 	write_json: Option<Option<PathBuf>>,
 	#[arg(short = 'J')]
@@ -92,12 +94,18 @@ async fn main() -> anyhow::Result<()> {
 	}
 
 	let mut json_printer = match (write_json, write_pretty_json) {
-		(Some(path), _) => JsonPrinter::compact(std::fs::File::create(
+		(Some(Some(path)), _) if path.to_string_lossy() == "-" => {
+			JsonPrinter::compact(Box::new(std::io::stderr()))
+		}
+		(Some(path), _) => JsonPrinter::compact(Box::new(std::fs::File::create(
 			output_dir.join(path.unwrap_or_else(|| "posts.json".into())),
-		)?),
-		(_, Some(path)) => JsonPrinter::pretty(std::fs::File::create(
+		)?)),
+		(_, Some(Some(path))) if path.to_string_lossy() == "-" => {
+			JsonPrinter::pretty(Box::new(std::io::stderr()))
+		}
+		(_, Some(path)) => JsonPrinter::pretty(Box::new(std::fs::File::create(
 			output_dir.join(path.unwrap_or_else(|| "posts.json".into())),
-		)?),
+		)?)),
 		_ => JsonPrinter::noop(),
 	};
 
@@ -269,17 +277,17 @@ pub struct GelbooruPost {
 }
 
 enum JsonPrinter {
-	Compact(std::fs::File, BTreeMap<String, GelbooruPost>),
-	Pretty(std::fs::File, BTreeMap<String, GelbooruPost>),
+	Compact(Box<dyn Write>, BTreeMap<String, GelbooruPost>),
+	Pretty(Box<dyn Write>, BTreeMap<String, GelbooruPost>),
 	NoOp,
 }
 
 impl JsonPrinter {
-	fn compact(file: std::fs::File) -> Self {
+	fn compact(file: Box<dyn Write>) -> Self {
 		Self::Compact(file, Default::default())
 	}
 
-	fn pretty(file: std::fs::File) -> Self {
+	fn pretty(file: Box<dyn Write>) -> Self {
 		Self::Pretty(file, Default::default())
 	}
 
