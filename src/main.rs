@@ -154,6 +154,8 @@ async fn _main() -> anyhow::Result<()> {
 		_ => JsonPrinter::noop(),
 	};
 
+	let t1 = tokio::time::Instant::now();
+
 	let processed = Arc::new(AtomicUsize::new(0));
 	let written = Arc::new(AtomicUsize::new(0));
 	let mut page = 0;
@@ -164,11 +166,12 @@ async fn _main() -> anyhow::Result<()> {
 		json_printer.insert_posts(&posts);
 
 		for post in posts {
-			let path = output_dir.join(&post.image);
+			let actual_filename = post.file_url.split('/').last().unwrap().to_owned();
+			let path = output_dir.join(&actual_filename);
 			if path.exists() {
 				println!(
 					"{}\t\talready exists {}/{}",
-					post.image,
+					actual_filename,
 					processed.fetch_add(1, Ordering::Relaxed),
 					attributes.count
 				);
@@ -177,19 +180,20 @@ async fn _main() -> anyhow::Result<()> {
 			let processed = processed.clone();
 			let written = written.clone();
 			let client = client.clone();
-			let semaphore = client.1.clone();
+			let semaphore = client.semaphore.clone();
 			let task = async move {
 				let _permit = semaphore.acquire().await;
 
 				let res = client.download_image(&post, &path).await;
 				let p = processed.fetch_add(1, Ordering::Relaxed) + 1;
+
 				match res {
 					Ok(()) => {
-						println!("{}\t\tdownloaded {}/{}", post.image, p, attributes.count);
+						println!("{}\tdownloaded {}/{}", actual_filename, p, attributes.count);
 						written.fetch_add(1, Ordering::Relaxed);
 					}
 					Err(err) => {
-						println!("{}\t\terror {err} {}/{}", post.image, p, attributes.count);
+						println!("{}\terror {err} {}/{}", actual_filename, p, attributes.count);
 					}
 				}
 
@@ -209,9 +213,10 @@ async fn _main() -> anyhow::Result<()> {
 	}
 
 	println!(
-		"Wrote {} files. Skipped {}.",
+		"Wrote {} files. Skipped {}. Time taken: {:.2?}",
 		written.load(Ordering::Relaxed),
-		processed.load(Ordering::Relaxed) - written.load(Ordering::Relaxed)
+		processed.load(Ordering::Relaxed) - written.load(Ordering::Relaxed),
+		t1.elapsed()
 	);
 
 	json_printer.write()?;
@@ -219,7 +224,11 @@ async fn _main() -> anyhow::Result<()> {
 	Ok(())
 }
 
-struct GelbooruClient(reqwest::Client, Arc<tokio::sync::Semaphore>);
+struct GelbooruClient {
+	image_client: reqwest::Client,
+	video_client: reqwest::Client,
+	semaphore: Arc<tokio::sync::Semaphore>,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum HttpVersion {
@@ -230,15 +239,25 @@ enum HttpVersion {
 
 impl GelbooruClient {
 	fn new(http: HttpVersion) -> anyhow::Result<Self> {
-		let client = reqwest::Client::builder()
+		let image_client = reqwest::Client::builder()
 			.user_agent(concat!(std::env!("CARGO_PKG_NAME"), "/", std::env!("CARGO_PKG_VERSION")))
-			.tcp_keepalive(Some(Duration::from_secs(60)));
-		let client = match http {
-			HttpVersion::Http1 => client,
-			HttpVersion::Http2 => client.http2_prior_knowledge(),
-			HttpVersion::Http3 => client.http3_prior_knowledge(),
+			.tcp_keepalive(Some(Duration::from_secs(60)))
+			.danger_accept_invalid_certs(true);
+		let image_client = match http {
+			HttpVersion::Http1 => image_client,
+			HttpVersion::Http2 => image_client.http2_prior_knowledge(),
+			HttpVersion::Http3 => image_client.http3_prior_knowledge(),
 		};
-		Ok(GelbooruClient(client.build()?, Arc::new(tokio::sync::Semaphore::new(24))))
+
+		let video_client = reqwest::Client::builder()
+			.user_agent(concat!(std::env!("CARGO_PKG_NAME"), "/", std::env!("CARGO_PKG_VERSION")))
+			.tcp_keepalive(Some(Duration::from_secs(60)))
+			.danger_accept_invalid_certs(true);
+		Ok(GelbooruClient {
+			image_client: image_client.build()?,
+			video_client: video_client.build()?,
+			semaphore: Arc::new(tokio::sync::Semaphore::new(24)),
+		})
 	}
 
 	async fn query_gelbooru(
@@ -251,7 +270,7 @@ impl GelbooruClient {
 	) -> anyhow::Result<GelbooruData> {
 		let tags = tags.join(" ");
 		Ok(self
-			.0
+			.image_client
 			.get("https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1")
 			.query(&[("limit", limit.to_string()), ("pid", page.to_string()), ("tags", tags)])
 			.query(&[
@@ -266,8 +285,12 @@ impl GelbooruClient {
 	}
 
 	async fn download_image(&self, post: &GelbooruPost, path: &Path) -> anyhow::Result<()> {
-		let bytes = self
-			.0
+		let client = if post.image.ends_with(".webm") || post.image.ends_with(".mp4") {
+			&self.video_client
+		} else {
+			&self.image_client
+		};
+		let bytes = client
 			.get(&post.file_url)
 			.send()
 			.await?
