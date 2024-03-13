@@ -8,6 +8,7 @@ use std::{
 		atomic::{AtomicUsize, Ordering},
 		Arc,
 	},
+	time::Duration,
 };
 use tokio::task::JoinSet;
 
@@ -49,14 +50,49 @@ If path is '-', writes to stderr."
 	#[arg(long)]
 	#[arg(help = "Makes the metadata JSON human-readable. Implies '--write-json'.")]
 	write_pretty_json: Option<Option<PathBuf>>,
+
+	#[arg(short = '2')]
+	#[arg(long)]
+	#[arg(help = "Use HTTP/2. Overrides --http3.")]
+	#[clap(action)]
+	http2: bool,
+	#[arg(short = '3')]
+	#[arg(long)]
+	#[arg(help = "Use HTTP/3. Enabled by default.")]
+	#[clap(action, default_value_t = true)]
+	http3: bool,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> anyhow::Result<()> {
+fn main() {
+	tokio::runtime::Builder::new_multi_thread()
+		.max_blocking_threads(1)
+		.worker_threads(2)
+		.thread_name_fn(|| {
+			static COUNTER: AtomicUsize = AtomicUsize::new(0);
+			let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+			format!("worker-{}", id)
+		})
+		.enable_all()
+		.build()
+		.unwrap()
+		.block_on(_main())
+		.unwrap();
+}
+
+async fn _main() -> anyhow::Result<()> {
 	// console_subscriber::init();
 
-	let Cli { yes, output_dir, tags, api_key, user_id, write_json, write_pretty_json } =
-		Cli::parse();
+	let Cli {
+		yes,
+		output_dir,
+		tags,
+		api_key,
+		user_id,
+		write_json,
+		write_pretty_json,
+		http2,
+		http3,
+	} = Cli::parse();
 
 	if api_key.as_ref().xor(user_id.as_ref()).is_some() {
 		return Err(anyhow!("api_key and user_id must be specified together"));
@@ -68,7 +104,15 @@ async fn main() -> anyhow::Result<()> {
 
 	println!("Searching for tags: {:?}", tags.join(" "));
 
-	let client = Arc::new(GelbooruClient::new()?);
+	let http = if http3 {
+		HttpVersion::Http3
+	} else if http2 {
+		HttpVersion::Http2
+	} else {
+		HttpVersion::Http1
+	};
+
+	let client = Arc::new(GelbooruClient::new(http)?);
 
 	let a = client.query_gelbooru(api_key.as_deref(), user_id.as_deref(), 1, 0, &tags).await;
 	let GelbooruData { attributes, .. } = a?;
@@ -79,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
 	}
 
 	if !yes {
-		print!("About to download {} files [Y/n]? ", attributes.count);
+		print!("Using {http:?}. About to download {} files [Y/n]? ", attributes.count);
 		std::io::stdout().flush()?;
 		let mut input = String::new();
 		std::io::stdin().read_line(&mut input)?;
@@ -122,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
 			let path = output_dir.join(&post.image);
 			if path.exists() {
 				println!(
-					"{}\talready exists {}/{}",
+					"{}\t\talready exists {}/{}",
 					post.image,
 					processed.fetch_add(1, Ordering::Relaxed),
 					attributes.count
@@ -140,11 +184,11 @@ async fn main() -> anyhow::Result<()> {
 				let p = processed.fetch_add(1, Ordering::Relaxed) + 1;
 				match res {
 					Ok(_) => {
-						println!("{}\tdownloaded {}/{}", post.image, p, attributes.count);
+						println!("{}\t\tdownloaded {}/{}", post.image, p, attributes.count);
 						written.fetch_add(1, Ordering::Relaxed);
 					}
 					Err(err) => {
-						println!("{}\terror {err} {}/{}", post.image, p, attributes.count);
+						println!("{}\t\terror {err} {}/{}", post.image, p, attributes.count);
 					}
 				}
 
@@ -176,18 +220,24 @@ async fn main() -> anyhow::Result<()> {
 
 struct GelbooruClient(reqwest::Client, Arc<tokio::sync::Semaphore>);
 
+#[derive(Clone, Copy, Debug)]
+enum HttpVersion {
+	Http1,
+	Http2,
+	Http3,
+}
+
 impl GelbooruClient {
-	fn new() -> anyhow::Result<Self> {
-		Ok(GelbooruClient(
-			reqwest::Client::builder()
-				.user_agent(concat!(
-					std::env!("CARGO_PKG_NAME"),
-					"/",
-					std::env!("CARGO_PKG_VERSION")
-				))
-				.build()?,
-			Arc::new(tokio::sync::Semaphore::new(24)),
-		))
+	fn new(http: HttpVersion) -> anyhow::Result<Self> {
+		let client = reqwest::Client::builder()
+			.user_agent(concat!(std::env!("CARGO_PKG_NAME"), "/", std::env!("CARGO_PKG_VERSION")))
+			.tcp_keepalive(Some(Duration::from_secs(60)));
+		let client = match http {
+			HttpVersion::Http1 => client,
+			HttpVersion::Http2 => client.http2_prior_knowledge(),
+			HttpVersion::Http3 => client.http3_prior_knowledge(),
+		};
+		Ok(GelbooruClient(client.build()?, Arc::new(tokio::sync::Semaphore::new(24))))
 	}
 
 	async fn query_gelbooru(
