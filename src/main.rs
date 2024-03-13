@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use clap::{Parser, Args};
+use clap::{Args, Parser};
 use std::{
 	collections::BTreeMap,
 	io::Write,
@@ -78,11 +78,6 @@ fn main() {
 	tokio::runtime::Builder::new_multi_thread()
 		.max_blocking_threads(1)
 		.worker_threads(2)
-		.thread_name_fn(|| {
-			static COUNTER: AtomicUsize = AtomicUsize::new(0);
-			let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-			format!("worker-{}", id)
-		})
 		.enable_all()
 		.build()
 		.unwrap()
@@ -189,7 +184,7 @@ async fn _main() -> anyhow::Result<()> {
 				let res = client.download_image(&post, &path).await;
 				let p = processed.fetch_add(1, Ordering::Relaxed) + 1;
 				match res {
-					Ok(_) => {
+					Ok(()) => {
 						println!("{}\t\tdownloaded {}/{}", post.image, p, attributes.count);
 						written.fetch_add(1, Ordering::Relaxed);
 					}
@@ -206,9 +201,9 @@ async fn _main() -> anyhow::Result<()> {
 	}
 
 	let mut joins = JoinSet::new();
-	tasks.into_iter().for_each(|x| {
+	for x in tasks {
 		joins.spawn(x);
-	});
+	}
 	while let Some(res) = joins.join_next().await {
 		res??;
 	}
@@ -340,11 +335,11 @@ enum JsonPrinter {
 
 impl JsonPrinter {
 	fn compact(file: Box<dyn Write>) -> Self {
-		Self::Compact(file, Default::default())
+		Self::Compact(file, BTreeMap::default())
 	}
 
 	fn pretty(file: Box<dyn Write>) -> Self {
-		Self::Pretty(file, Default::default())
+		Self::Pretty(file, BTreeMap::default())
 	}
 
 	fn noop() -> Self {
