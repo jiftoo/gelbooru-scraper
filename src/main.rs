@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use clap::Parser;
+use clap::{Parser, Args};
 use std::{
 	collections::BTreeMap,
 	io::Write,
@@ -51,9 +51,20 @@ If path is '-', writes to stderr."
 	#[arg(help = "Makes the metadata JSON human-readable. Implies '--write-json'.")]
 	write_pretty_json: Option<Option<PathBuf>>,
 
+	#[clap(flatten)]
+	http_args: HttpArgs,
+}
+
+#[derive(Args, Debug)]
+#[group(required = false, multiple = false)]
+struct HttpArgs {
+	#[arg(long)]
+	#[arg(short = '1')]
+	#[arg(help = "Use HTTP/1.1.")]
+	http1: bool,
 	#[arg(short = '2')]
 	#[arg(long)]
-	#[arg(help = "Use HTTP/2. Overrides --http3.")]
+	#[arg(help = "Use HTTP/2.")]
 	#[clap(action)]
 	http2: bool,
 	#[arg(short = '3')]
@@ -82,17 +93,8 @@ fn main() {
 async fn _main() -> anyhow::Result<()> {
 	// console_subscriber::init();
 
-	let Cli {
-		yes,
-		output_dir,
-		tags,
-		api_key,
-		user_id,
-		write_json,
-		write_pretty_json,
-		http2,
-		http3,
-	} = Cli::parse();
+	let Cli { yes, output_dir, tags, api_key, user_id, write_json, write_pretty_json, http_args } =
+		Cli::parse();
 
 	if api_key.as_ref().xor(user_id.as_ref()).is_some() {
 		return Err(anyhow!("api_key and user_id must be specified together"));
@@ -104,12 +106,16 @@ async fn _main() -> anyhow::Result<()> {
 
 	println!("Searching for tags: {:?}", tags.join(" "));
 
-	let http = if http3 {
-		HttpVersion::Http3
-	} else if http2 {
-		HttpVersion::Http2
-	} else {
-		HttpVersion::Http1
+	let http = match http_args {
+		HttpArgs { http1: true, .. } => HttpVersion::Http1,
+		HttpArgs { http2: true, .. } => HttpVersion::Http2,
+		HttpArgs { http3: true, .. } => HttpVersion::Http3,
+		HttpArgs { http1, http2, http3 } => {
+			println!(
+				"Invalid combination of arguments: http1={http1}, http2={http2}, http3={http3}"
+			);
+			std::process::exit(1);
+		}
 	};
 
 	let client = Arc::new(GelbooruClient::new(http)?);

@@ -1,8 +1,8 @@
 [package]
 name = "gelbooru-scraper"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Jiftoo <contact@jiftoo.dev>"]
-description = "A simple CLI tool to download images from Gelbooru"
+description = "CLI tool for downloading images from Gelbooru"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

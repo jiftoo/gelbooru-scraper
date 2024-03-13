@@ -1,0 +1,9 @@
+[build]
+rustflags = [
+	"--cfg",
+	"tokio_unstable",
+	"--cfg",
+	"reqwest_unstable",
+	"-C",
+	"target-feature=+sse3,+avx,+avx2,+fma",
+]
