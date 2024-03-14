@@ -170,7 +170,7 @@ async fn _main() -> anyhow::Result<()> {
 			let path = output_dir.join(&actual_filename);
 			if path.exists() {
 				println!(
-					"{}\t\talready exists {}/{}",
+					"{}\talready exists {}/{}",
 					actual_filename,
 					processed.fetch_add(1, Ordering::Relaxed),
 					attributes.count
