@@ -51,6 +51,9 @@ If path is '-', writes to stderr."
 	#[arg(help = "Makes the metadata JSON human-readable. Implies '--write-json'.")]
 	write_pretty_json: Option<Option<PathBuf>>,
 
+	#[arg(long, help = "Optional proxy to use for all requests (e.g., socks5://127.0.0.1:9050)")]
+	proxy: Option<String>,
+
 	#[clap(flatten)]
 	http_args: HttpArgs,
 }
@@ -88,7 +91,7 @@ fn main() {
 async fn _main() -> anyhow::Result<()> {
 	// console_subscriber::init();
 
-	let Cli { yes, output_dir, tags, api_key, user_id, write_json, write_pretty_json, http_args } =
+	let Cli { yes, output_dir, tags, api_key, user_id, write_json, write_pretty_json, proxy, http_args } =
 		Cli::parse();
 
 	if api_key.as_ref().xor(user_id.as_ref()).is_some() {
@@ -113,7 +116,7 @@ async fn _main() -> anyhow::Result<()> {
 		}
 	};
 
-	let client = Arc::new(GelbooruClient::new(http)?);
+	let client = Arc::new(GelbooruClient::new(http, proxy.as_deref())?);
 
 	let a = client.query_gelbooru(api_key.as_deref(), user_id.as_deref(), 1, 0, &tags).await;
 	let GelbooruData { attributes, .. } = a?;
@@ -228,6 +231,7 @@ struct GelbooruClient {
 	image_client: reqwest::Client,
 	video_client: reqwest::Client,
 	semaphore: Arc<tokio::sync::Semaphore>,
+
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -238,24 +242,39 @@ enum HttpVersion {
 }
 
 impl GelbooruClient {
-	fn new(http: HttpVersion) -> anyhow::Result<Self> {
-		let image_client = reqwest::Client::builder()
-			.user_agent(concat!(std::env!("CARGO_PKG_NAME"), "/", std::env!("CARGO_PKG_VERSION")))
-			.tcp_keepalive(Some(Duration::from_secs(60)))
-			.danger_accept_invalid_certs(true);
-		let image_client = match http {
-			HttpVersion::Http1 => image_client,
-			HttpVersion::Http2 => image_client.http2_prior_knowledge(),
-			HttpVersion::Http3 => image_client.http3_prior_knowledge(),
+	fn new(http: HttpVersion, proxy: Option<&str>) -> anyhow::Result<Self> {
+		let proxy = match proxy {
+			Some(url) => Some(reqwest::Proxy::all(url)?),
+			None => None,
 		};
 
-		let video_client = reqwest::Client::builder()
+		let mut image_client_builder = reqwest::Client::builder()
 			.user_agent(concat!(std::env!("CARGO_PKG_NAME"), "/", std::env!("CARGO_PKG_VERSION")))
 			.tcp_keepalive(Some(Duration::from_secs(60)))
 			.danger_accept_invalid_certs(true);
+		
+		if let Some(p) = &proxy {
+			image_client_builder = image_client_builder.proxy(p.clone());
+		}
+
+		let image_client_builder = match http {
+			HttpVersion::Http1 => image_client_builder,
+			HttpVersion::Http2 => image_client_builder.http2_prior_knowledge(),
+			HttpVersion::Http3 => image_client_builder.http3_prior_knowledge(),
+		};
+
+		let mut video_client_builder = reqwest::Client::builder()
+			.user_agent(concat!(std::env!("CARGO_PKG_NAME"), "/", std::env!("CARGO_PKG_VERSION")))
+			.tcp_keepalive(Some(Duration::from_secs(60)))
+			.danger_accept_invalid_certs(true);
+
+		if let Some(p) = &proxy {
+			video_client_builder = video_client_builder.proxy(p.clone());
+		}
+
 		Ok(GelbooruClient {
-			image_client: image_client.build()?,
-			video_client: video_client.build()?,
+			image_client: image_client_builder.build()?,
+			video_client: video_client_builder.build()?,
 			semaphore: Arc::new(tokio::sync::Semaphore::new(24)),
 		})
 	}
